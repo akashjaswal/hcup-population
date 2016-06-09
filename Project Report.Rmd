@@ -1,0 +1,194 @@
+---
+title: "Washington State Hospitalization and Vaccination (HCUP) -- Independent Study (Spring 2016)"
+author: "Akashdeep Jaswal"
+date: "June 8, 2016"
+output: pdf_document
+---
+
+This Project is part of the Independent Study (Apr'16 - June'16) under the guidance of Prof. Benjamin Althouse.
+
+##About Healthcare Cost and Utilization Project (HCUP):
+
+HCUP is the Nation’s most comprehensive source of hospital data, including information on in-patient care, ambulatory care, and emergency department visits. HCUP enables researchers, insurers, policymakers and others to study health care delivery and patient outcomes over time, and at the national, regional, State, and community levels. For details about this initiative [see](http://www.hcup-us.ahrq.gov/)
+
+
+
+##Working with Data
+  1. WA State Hospitalization Records (23 years, over 5.7 million records)
+  2. WA State Vaccination Data (reliable monthly data 2004 onwards, all zipcodes)
+  3. WA State Population Census and Demographics (24 years, all county data aggregated at AgeGroup and Gender Level)
+
+
+
+##Project Overview and Data Preparation Workflow
+  - Step 1: Scraping Population and Demographics data from WA State by County, AgeGroup, Gender, Year - Past 3 decades. Data Scraped from [here](http://www.census.gov/popest/data/intercensal/index.html) (Script language: Python)
+  - Step 2: Interpolated data for Month, Year from the Deccenial Intercensal Population Data: Linear Method for Interpolation used.(Script language: Python)
+  - Step 3: Cleaning Vaccination Data by mapping Zip codes to Counties in WA and dividing year and month numerals. (Script language: Python)
+  - Step 4: Loading Hospitalization data from RDat files and filter variables: age, female, ayear, amonth, pstco2, zip (Script Language: R)
+  - Step 5: Map every hospitalized patient to an age group ranging from 1 to 18 based on their age during the time of admission.
+  - Step 6: Aggregate Hospitalizations by Gender, AgeGroup, Year, Month and pstco2 (FIPS) -- FIPS represents the relationship between county and Zip code.
+  - Step 7: For our vaccination fixed effects model, we only use age group 0-4 years (agegroup1). Filter Data corresponding to age group 1 for population dataset and hospitalization dataset (Script Language: Python)
+  - Step 8: Merge and Join datasets -- Population, Hospitalization and Vaccination on Year, Month, County, AgeGroup. 
+  - Step 9: Normalized the all-cause hospitalization and all vaccination count by dividing by corresponding population figures of the month, year in the related county.
+  - Step 10: Exploratory Analysis and Plotting Lattices for overview. 
+  - Step 11: Statistical Analysis and Fixed Effects Model fitting.
+  
+  
+##Exploratory Analysis
+We use the following R packages in the data visualization and model fitting stages of the project:
+```{r, results='hide',message=FALSE, warning=FALSE}
+# Project Working directory
+setwd("~/Desktop/Projects/hcup-data/")
+
+#Installing required packages
+install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+install.packages("plm",repos = "http://cran.us.r-project.org") 
+install.packages("data.table",repos = "http://cran.us.r-project.org")
+
+#Loading packages
+library(plm) #For Running Fixed Effects Models
+library(ggplot2) #For Plotting
+library(lattice) #Lattice and Coplots
+library(data.table) #Cross Tabulation
+library(scales) #Colors for discrete plots
+
+```
+
+
+Let's visualize the population data since 1990 by different age groups since we want to be sure of the sample distribution is not anamolous. 
+
+```{r, fig.width=7, fig.height=2.7}
+setwd("~/Desktop/Projects/hcup-data/")
+WA_population <- read.csv("WA_population_data.csv")
+WA_population <- data.frame(WA_population)
+cols <- c('Population','Year','AgeGroup')
+pop1 <-  subset(WA_population)[cols]
+pop_agg <- aggregate(pop1, by=list(year=WA_population$Year, 
+                    AgeGroup=WA_population$AgeGroup), FUN=sum)
+pop_agg <- pop_agg[c('year','AgeGroup','Population')]
+color_p <- c('#4183D7','#1F3A93', '#00B16A','#1E824C','#F4D03F','#F9690E','#D91E18') 
+d <- ggplot(pop_agg, aes(x = year, y = Population, fill = AgeGroup)) +
+     geom_bar(stat = "identity", alpha = 0.5) + 
+     scale_y_continuous(name="Population", labels = comma) + 
+     theme_bw() 
+d + scale_fill_gradientn(colours = color_p, space = "Lab", guide = "colourbar") +
+    ggtitle("WA State population trends by age group per year")
+```
+
+
+
+
+Visualizing population trends over different counties. 
+```{r,fig.width=16, fig.height=16}
+pop_agg1 <- aggregate(pop1, by=list(year=WA_population$Year, County=WA_population$County), FUN=sum)
+pop_agg1 <- pop_agg1[c('year','County','Population')]
+xyplot(Population ~ year | factor(County), data=pop_agg1, pch=19, type=c("p","g"),
+       main="Population Trends by County", alpha=0.4)
+```
+
+
+Steps 3 to 9 mentioned in the project workflow are done in python, the notebook can be found [here]()
+
+Now, loading and working with the final clean dataset that contains merged attributes related to hospitalizations, vaccinations and demographics.
+
+Let's visualize the aggregated totals in all cause hospitalizations and vaccinations for every county by year. Each year has 12 months data so there are multiple scattered dots for each year overlapping. 
+
+```{r,fig.width=20, fig.height=20}
+
+setwd("~/Desktop/Projects/hcup-data/")
+paneldata = read.csv("Master_Data_Final.csv")
+
+# Visualizing patients Count -- ie, Total All Aggregated All Cause Hospitalizations
+xyplot(Patients_Count ~ year | factor(County), data=paneldata, 
+       pch=19, type=c("p","g"), auto.key=list(columns=1, lines=TRUE, points=FALSE, cex=1), alpha = 0.2,
+       main=list(label="Patients Count by County by Year",cex=2))
+
+
+
+# Visualizing Vaccination Count
+xyplot(all_vaccinated ~ year | factor(County), data=paneldata, 
+       pch=19, type=c("p","g"), auto.key=list(columns=1, lines=TRUE, points=FALSE, cex=1), alpha = 0.2,
+       main=list(label="All Vaccinations Count by County by Year",cex=2))
+
+
+
+# Visualizing only complete 4313314 series Complete dose
+xyplot(X4313314_SERIES ~ year | factor(County), data=paneldata, 
+       pch=19, type=c("p","g"), auto.key=list(columns=2, lines=TRUE, points=FALSE, cex=1), alpha = 0.2,
+       main=list(label="All 4313314 Series count by County by Year",cex=2))
+
+
+
+# Visualizing all 3 parameters together
+xyplot(all_vaccinated + X4313314_SERIES + Patients_Count ~ year | factor(County), 
+       data=paneldata, pch=19, type=c("p","g"), auto.key=list(columns=2, lines=TRUE, points=FALSE, cex=2), alpha = 0.2, 
+       main=list(label="Vaccination And Hospitalization Patients Count by Year by County",cex=2))
+```
+
+
+
+
+
+
+We observe that the data is very sparse and some counties have more hospitalizations and vaccinations than others, so we have normalized our all cause hospitalization count with population numbers for the corresponding year and month in the given county. The same logic applies for the vaccination data as well. This smoothens our data and does not let any bias caused by population sizes of different counties effect the coefficient values. Below are the new plots:
+
+```{r,fig.width=20, fig.height=20}
+
+# Visualizing patients ratio (ie, Patients/Population Normalized) 
+xyplot(Patients_Ratio ~ year | factor(County), data=paneldata, 
+       pch=19, type=c("p","g"), auto.key=list(columns=2, lines=TRUE, points=FALSE, cex=1), alpha = 0.2,
+       main=list(label="Patients Ratio (Normalized by Monthly Population)",cex=2))
+
+
+
+
+# Visualizing Vaccinated ratio (ie, All Vaccinations/Population Normalized) 
+xyplot(All_Vaccinated_Ratio ~ year | factor(County), data=paneldata, 
+       pch=19, type=c("p","g"), auto.key=list(columns=2, lines=TRUE, points=FALSE, cex=1), alpha = 0.2,
+       main=list(label="All Vaccinations Ratio (Normalized by Monthly Population)",cex=2))
+
+
+
+
+# Visualizing only complete 4313314 series ratio (ie, 4313314 series/Population Normalized) 
+xyplot(All_4313314_Ratio ~ year | factor(County), data=paneldata, 
+       pch=19, type=c("p","g"), auto.key=list(columns=2, lines=TRUE, points=FALSE, cex=2), alpha = 0.2,
+       main=list(label="All 4313314 Series Ratio (Normalized by Monthly Population)",cex=2))
+
+
+
+
+# Visualizing all 3 parameters together
+xyplot(All_Vaccinated_Ratio + All_4313314_Ratio + Patients_Ratio ~ year | factor(County), 
+       data=paneldata, pch=19, type=c("p","g"), auto.key=list(columns=2, lines=TRUE, points=FALSE, cex=2), alpha = 0.2, 
+       main=list(label="Normalized Vaccination Ratios And Hospitalization Patients Ratio by Year by County", cex=2))
+```
+
+We use the PLM package to fit our fixed effects model. The reason we are using the fixed effect model is to get rid of any internal biases in our longitudinal panel data. We use county as a factor and the year-month combination to created fixed effect models of type "within". 
+
+To first demonstrate the effect of neglecting counties and time in our model, we will create a dummy model that does not account for counties and builds a simple OLS model between Patients_Ratio ~ All_Vaccinated_Ratio (This does not consider an interaction term for counties)
+
+```{r}
+reg0 <- plm(Patients_Ratio ~ All_Vaccinated_Ratio, data = paneldata, 
+            index = c("County", "Timeline"), model = "within", effect = "time")
+summary(reg0)
+
+```
+
+Here the model output can be interpretted as for every unit increase in all vaccinations normalized ratio, the hospitalization normalized ratio increases by 0.073. This seems illogical as vaccinations cannot possibly boost the number of all cause hospitalizations in the age range 0-4 years. To over these biases, we introduce a new control variable for Counties. This would be interesting to look at since every county has a different behavior and might have different coefficients that contribute to the model. 
+
+```{r}
+reg1 <- plm(Patients_Ratio ~ All_Vaccinated_Ratio * factor(County), 
+            data = paneldata, index = c("County", "Timeline"), 
+            model = "within", effect = "time")
+summary(reg1)
+```
+
+##Conclusion
+In this new model, we observe that introduction of the county interaction term has considerable effect on the model -- In terms of statistical signifiance only almost half the county coefficients have p value < 0.05 critical value. Interpretting the model, we see that for every increase in vaccination normalized count in most counties there is a decrease in all cause hospitalization by little magnitude for agegroup 0 to 4 years.
+
+##References
+  1.  Blumenstock, J. (n.d.). Fixed Effects Models. Retrieved from http://www.jblumenstock.com/files/courses/econ174/FEModels.pdf
+  2.  Croissant, Y., & Millo, G. (2008). Panel Data Econometrics in R: The plm Package. Retrieved from https://cran.r-project.org/web/packages/plm/vignettes/plm.pdf
+  3.  Reyna, O. T. (2010). Getting Started in Fixed/Random Effects Models using R. Retrieved from http://www.princeton.edu/~otorres/Panel101R.pdf
+  
