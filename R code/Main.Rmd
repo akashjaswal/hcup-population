@@ -1,0 +1,391 @@
+---
+title: "Healthcare Cost and Utilization Project"
+author: "Akashdeep Jaswal"
+date: "10/31/2016"
+output: pdf_document
+---
+
+### About Healthcare Cost and Utilization Project (HCUP):
+
+HCUP is the Nation’s most comprehensive source of hospital data, including information on in-patient care, ambulatory care, and emergency department visits. HCUP enables researchers, insurers, policymakers and others to study health care delivery and patient outcomes over time, and at the national, regional, State, and community levels. For details about this initiative [see](http://www.hcup-us.ahrq.gov/)
+
+
+```{r, message=FALSE, warning=FALSE}
+# Importing Packages
+library(tidyverse)
+library(plm)
+library(ggplot2)
+library(lattice)
+
+```
+
+### 1. Importing Data
+
+#### 1.1 Reading Inpatient Hospitalization Data
+
+Variable encoding scheme and definitions for HCUP Data: [here](https://www.hcup-us.ahrq.gov/db/state/siddist/sid_multivar.jsp)
+
+```{r}
+setwd("~/Desktop/AkashPersonal/hcup-population")
+
+# Reading the Hospitalization Data
+hosp.data <- NULL
+for (year in seq(2004,2013,by=1)) {
+  
+  # path name on how to read the file  
+  file <- paste('data/HospData/WA_SIDC_',year,'_CORE','.rdat',sep='')
+  print (c("Reading data from", file))
+  
+  # Loading RDat files and Appending to DF 
+  load(file)
+  cols <- c("ayear","amonth","pstco2","zip","pl_ur_cat4","age","female","dx1","dxccs1")
+  temp <- data.frame(temp)[cols]
+  hosp.data <- rbind(hosp.data,temp)
+  
+  # Tabular Dataframe
+  hosp.data <- tbl_df(hosp.data)
+}
+
+```
+
+#### 1.2 Importing Vaccination Data and Census Demographics
+
+```{r}
+
+vaccine.data <- read.csv('~/Desktop/AkashPersonal/hcup-population/data/Vaccine_clean_data.csv')
+census.data <- read.csv('~/Desktop/AkashPersonal/hcup-population/data/Final_Population_Interpolated.csv')
+
+```
+
+### 2. Data Wrangling
+
+#### 2.1 Data Type Casting
+
+```{r, warning=FALSE}
+# Recasting Variables appropriately - Hospitalization
+hosp.data$zip <- as.integer(hosp.data$zip)
+hosp.data$dx1 <- as.integer(hosp.data$dx1)
+hosp.data$pl_ur_cat4 <- as.integer(hosp.data$pl_ur_cat4)
+hosp.data <- hosp.data %>% 
+  mutate(urban_rural=ifelse(pl_ur_cat4==1, "Large Metropolitan", 
+                            ifelse(pl_ur_cat4==2, "Small Metropolitan", 
+                            ifelse(pl_ur_cat4==3, "Micropolitan",
+                                   "Not Metro/Micro"))))
+hosp.data$urban_rural <- as.factor(hosp.data$urban_rural)
+
+# Demographic data from US Census (Monthly Interpolated by WA County)
+census.data$year <- as.integer(census.data$year)
+
+```
+
+#### 2.2 Filtering, Aggregating and Mapping Data
+
+```{r}
+
+# Filtering, Aggregating and Summarizing Hosp Data
+hosp.filtered <- hosp.data %>% 
+  filter(age >= 0 & age <= 4 & ayear >= 2004) %>%
+  mutate(AgeGroup=1) %>%
+  group_by(ayear, amonth, zip, pstco2, dx1, dxccs1, AgeGroup, urban_rural) %>%
+  summarise(hospitalizations=n())
+
+# Zip Code - County FIPS Mapping
+zip.fips.mapping <- hosp.data %>% 
+  select(zip, pstco2) %>%
+  group_by(zip, pstco2) %>%
+  summarise(n())
+
+# Mapping the FIPS County codes to Zip Codes in Vaccine Data
+vaccine.data <- merge(vaccine.data, zip.fips.mapping[c('zip','pstco2')], 
+                      by.x=c("ADDRESS_ZIP"), by.y=c("zip"))
+vaccine.data <- vaccine.data[ , !duplicated(colnames(vaccine.data))]
+
+# Cleaning Census Data
+census.clean <- census.data %>%
+  select(year, month, County, FIPS, AgeGroup, Population) %>%
+  group_by(year, month, County, FIPS, AgeGroup) %>%
+  summarise(Population=sum(Population))
+
+```
+
+### 3. Building Fixed Effect Models
+
+#### 3.1 All Cause Hospitalization - Vaccination Fixed Effects
+
+```{r}
+
+# All Cause Hospitalization
+all.cause.hosp <- hosp.filtered %>%
+  select(ayear, amonth, AgeGroup, hospitalizations, pstco2, urban_rural) %>%
+  group_by(ayear, amonth, pstco2, AgeGroup,urban_rural) %>%
+  summarise(patients=sum(hospitalizations))
+
+all.cause.hosp <- merge(all.cause.hosp, census.clean, by.x=c("ayear","amonth","pstco2","AgeGroup"),
+                       by.y=c("year","month","FIPS","AgeGroup"))
+all.cause.hosp <- mutate(all.cause.hosp, hosp_norm = patients/Population)
+
+names(all.cause.hosp)[1] <- 'year'
+names(all.cause.hosp)[2] <- 'month'
+names(all.cause.hosp)[3] <- 'FIPS'
+
+vaccine.filtered <- vaccine.data %>%
+  select(year, month, FIPS=pstco2, X4313314.SERIES, TOTAL.POPULATION) %>%
+  group_by(year, month, FIPS) %>%
+  summarise(X4313314_Norm=sum(X4313314.SERIES)/sum(TOTAL.POPULATION),
+            X4313314=sum(X4313314.SERIES), TOTAL_POPULATION=sum(TOTAL.POPULATION))
+
+all.cause.merge <- merge(all.cause.hosp, vaccine.filtered, by=c("year","month","FIPS"))
+all.cause.merge$t_index <- interaction(all.cause.merge$year, all.cause.merge$month,sep=".")
+summary(all.cause.merge)
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Plotting the data
+ggplot(all.cause.merge, aes(X4313314_Norm,hosp_norm)) + geom_point(alpha=0.2) +
+  geom_smooth() + theme_minimal(base_size = 8)
+
+xyplot(hosp_norm ~ X4313314_Norm  | factor(County), data=all.cause.merge, 
+       pch=19, type=c("p","r"), alpha = 0.2, 
+       main=list(label="All Cause Hospitalization Trends by County Category",cex=0.8),
+       sub=list(label="11",cex=0.1),
+       par.settings=simpleTheme(col="#59ABE3", col.line="red"),
+       par.strip.text=list(cex=0.5))
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Fixed Effects All Cause Hospitalization
+fe.all.cause <- plm(hosp_norm ~ X4313314_Norm, data = all.cause.merge, 
+                    index = c("FIPS", "t_index"), model = "within", effect = "individual")
+
+summary(fe.all.cause)
+summary(fixef(fe.all.cause))
+fixef.all.cause <- matrix(fixef(fe.all.cause))
+fixef.df <- as.data.frame(cbind(sort(unique(all.cause.merge$FIPS)), fixef.all.cause))
+colnames(fixef.df) <- c("FIPS","coeff")
+fixef.df$FIPS <- as.character(fixef.df$FIPS)
+fixef.df <- mutate(fixef.df, id=substr(FIPS, 3,5))
+fixef.df <- fixef.df[c("coeff",'id')]
+
+```
+
+
+```{r message=FALSE, message=FALSE, warning=FALSE}
+# Setting up Mapping Libraries
+library(GGally)
+library(rgdal)
+library(ggmap)
+library(rgeos)
+library(broom)
+library(Cairo)
+library(maptools)
+library(maps)
+library(choroplethr)
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+# Loading Shapefiles and boundaries
+map.shapefile <- readOGR(dsn = "/Users/ajaswal/Desktop/hcup-population/Shapefiles/tl_2013_53_cousub", 
+                         layer = "tl_2013_53_cousub")
+map.df <- fortify(map.shapefile, region="COUNTYFP") 
+```
+
+```{r, message=FALSE, warning=FALSE}
+map.df.merge <- merge(map.df,fixef.df, by="id") 
+ggplot() +
+  geom_polygon(data = map.df.merge, aes(x = long, y = lat, group = group,
+        fill = coeff), color = NA) + 
+  theme_minimal(base_size = 8) + coord_map() +
+  scale_fill_distiller(palette = "YlOrRd") +
+  ggtitle("Fixed Effect Coefficients for X4313314_Norm on 
+          All Cause Hospitalization for Kids - Within County")
+
+# Trying Google Maps Overlay
+map <- get_map("WA State", zoom = 7, maptype = "roadmap")
+p <- ggmap(map)
+p + geom_polygon(data = map.df.merge, aes(x = long, y = lat, group = group,
+  fill = coeff), color = "grey", size=0.1, alpha=0.6) +
+  scale_fill_distiller(palette = "YlOrRd") + 
+  ggtitle("WA State Counties-All Cause Hospitalization") +
+  theme_minimal(base_size = 8)
+
+```
+
+
+### Now Running Fixed Effects for Specific Type of Diagnosis
+
+#### Single-Level CCS - Diagnoses: [Codes](https://www.hcup-us.ahrq.gov/toolssoftware/ccs/CCSCategoryNames_FullLabels.pdf)
+
+#### Diagnoses related to Respiratory Diseases
+
+122 Pneumonia (except that caused by tuberculosis or sexually transmitted disease)
+123 Influenza
+124 Acute and chronic tonsillitis
+125 Acute bronchitis
+126 Other upper respiratory infections
+127 Chronic obstructive pulmonary disease and bronchiectasis
+128 Asthma
+129 Aspiration pneumonitis; food/vomitus
+130 Pleurisy; pneumothorax; pulmonary collapse
+131 Respiratory failure; insufficiency; arrest (adult)
+132 Lung disease due to external agents
+133 Other lower respiratory disease
+134 Other upper respiratory disease
+
+```{r, message=FALSE, warning=FALSE}
+# Filtering only Diagnoses related to Respiratory Diseases
+hosp.resp <- hosp.filtered %>%
+  select(ayear, amonth, zip, pstco2, AgeGroup, urban_rural, hospitalizations, dxccs1) %>%
+  filter(dxccs1 >= 122 & dxccs1 <= 134)
+
+# Aggregating
+hosp.resp <- hosp.resp[c("ayear","amonth","pstco2","hospitalizations","AgeGroup")]
+hosp.resp <- aggregate(hospitalizations~ayear+amonth+pstco2+AgeGroup, data=hosp.resp, sum)
+
+# Joining population for normalization
+hosp.resp <- merge(hosp.resp, census.clean, by.x=c("ayear","amonth","pstco2","AgeGroup"),
+                       by.y=c("year","month","FIPS","AgeGroup"))
+hosp.resp <- mutate(hosp.resp, resp_hosp_norm = hospitalizations/Population)
+names(hosp.resp)[1] <- 'year'
+names(hosp.resp)[2] <- 'month'
+names(hosp.resp)[3] <- 'FIPS'
+
+# Respiratory Hospitalizations
+resp.merge <- merge(hosp.resp, vaccine.filtered, by=c("year","month","FIPS"))
+resp.merge$t_index <- interaction(resp.merge$year, resp.merge$month,sep=".")
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Plotting the data
+ggplot(resp.merge , aes(X4313314_Norm,resp_hosp_norm)) + 
+  geom_point(alpha=0.1) + geom_smooth() + theme_minimal(base_size = 8) +
+  ggtitle("Hospitalizations related to Respiratory Problems")
+
+xyplot(resp_hosp_norm ~ X4313314_Norm | factor(County), data=resp.merge, 
+       pch=19, type=c("p","r"), alpha = 0.1, 
+       main=list(label="Hospitalizations related to Respiratory Problems By County",cex=0.8),
+       sub=list(label="11",cex=0.1),
+       par.settings=simpleTheme(col="#59ABE3", col.line="red"),
+       par.strip.text=list(cex=0.5))
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Fixed Effects Respiratory related Hospitalization
+fe.resp <- plm(resp_hosp_norm ~ X4313314_Norm, data = resp.merge, 
+               index = c("FIPS", "t_index"), model = "within", effect = "individual")
+
+summary(fe.resp)
+summary(fixef(fe.resp))
+fixef.resp <- matrix(fixef(fe.resp))
+fixef.resp.df <- as.data.frame(cbind(sort(unique(resp.merge$FIPS)), fixef.resp))
+colnames(fixef.resp.df) <- c("FIPS","coeff")
+fixef.resp.df$FIPS <- as.character(fixef.resp.df$FIPS)
+fixef.resp.df <- mutate(fixef.resp.df, id=substr(FIPS, 3,5))
+fixef.resp.df <- fixef.resp.df[c("coeff",'id')]
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Choropleth for Respiratory related diagnoses
+map.df.merge <- merge(map.df,fixef.resp.df, by="id") 
+ggplot() +
+  geom_polygon(data = map.df.merge, aes(x = long, y = lat, group = group,
+        fill = coeff), color = NA) + 
+  theme_minimal(base_size = 8) + coord_map() +
+  scale_fill_distiller(palette = "YlOrRd") +
+  ggtitle("Fixed Effect Coefficients for X4313314_Norm on 
+          Respiratory related Hospitalization for Kids - Within County")
+
+```
+
+
+#### Diagnoses not related to Vaccinations 
+
+226 Fracture of neck of femur (hip)
+227 Spinal cord injury
+228 Skull and face fractures
+229 Fracture of upper limb
+230 Fracture of lower limb
+231 Other fractures
+232 Sprains and strains
+233 Intracranial injury
+234 Crushing injury or internal injury
+235 Open wounds of head; neck; and trunk
+236 Open wounds of extremities
+237 Complication of device; implant or graft
+238 Complications of surgical procedures or medical care
+239 Superficial injury; contusion
+240 Burns
+241 Poisoning by psychotropic agents
+242 Poisoning by other medications and drugs
+243 Poisoning by nonmedicinal substances
+244 Other injuries and conditions due to external causes
+
+```{r, message=FALSE, warning=FALSE}
+# Filtering only Diagnoses related to Non-Respiratory Generic Diseases
+hosp.general <- hosp.filtered %>%
+  select(ayear, amonth, zip, pstco2, AgeGroup, urban_rural, hospitalizations, dxccs1) %>%
+  filter(dxccs1 >= 226 & dxccs1 <= 244)
+
+# Aggregating
+hosp.general <- hosp.general[c("ayear","amonth","pstco2","hospitalizations","AgeGroup")]
+hosp.general <- aggregate(hospitalizations~ayear+amonth+pstco2+AgeGroup, 
+                          data=hosp.general, sum)
+
+# Joining population for normalization
+hosp.general <- merge(hosp.general, census.clean, 
+                      by.x=c("ayear","amonth","pstco2","AgeGroup"),
+                      by.y=c("year","month","FIPS","AgeGroup"))
+hosp.general <- mutate(hosp.general, gen_hosp_norm = hospitalizations/Population)
+names(hosp.general)[1] <- 'year'
+names(hosp.general)[2] <- 'month'
+names(hosp.general)[3] <- 'FIPS'
+
+# Respiratory Hospitalizations
+gen.merge <- merge(hosp.general, vaccine.filtered, by=c("year","month","FIPS"))
+gen.merge$t_index <- interaction(gen.merge$year, gen.merge$month,sep=".")
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Plotting the data
+ggplot(gen.merge , aes(X4313314_Norm,gen_hosp_norm)) + 
+  geom_point(alpha=0.1) + geom_smooth() + theme_minimal(base_size = 8) +
+  ggtitle("Generic Hospitalizations")
+
+xyplot(gen_hosp_norm ~ X4313314_Norm | factor(County), data=gen.merge, 
+       pch=19, type=c("p","r"), alpha = 0.1, 
+       main=list(label="Generic Hospitalizations By County",cex=0.8),
+       sub=list(label="11",cex=0.1),
+       par.settings=simpleTheme(col="#59ABE3", col.line="red"),
+       par.strip.text=list(cex=0.5))
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Fixed Effects - Generic Hospitalizations
+fe.gen <- plm(gen_hosp_norm ~ X4313314_Norm, data = gen.merge, 
+              index = c("FIPS", "t_index"), model = "within", effect = "individual")
+summary(fe.gen)
+summary(fixef(fe.gen))
+fixef.gen <- matrix(fixef(fe.gen))
+fixef.gen.df <- as.data.frame(cbind(sort(unique(gen.merge$FIPS)), fixef.gen))
+colnames(fixef.gen.df) <- c("FIPS","coeff")
+fixef.gen.df$FIPS <- as.character(fixef.gen.df$FIPS)
+fixef.gen.df <- mutate(fixef.gen.df, id=substr(FIPS,3,5))
+fixef.gen.df <- fixef.gen.df[c("coeff",'id')]
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Choropleth for Respiratory related diagnoses
+map.df.merge <- merge(map.df,fixef.gen.df, by="id") 
+ggplot() +
+  geom_polygon(data = map.df.merge, aes(x = long, y = lat, group = group,
+        fill = coeff), color = NA) + 
+  theme_minimal(base_size = 8) + coord_map() +
+  scale_fill_distiller(palette = "YlOrRd") +
+  ggtitle("Fixed Effect Coefficients for X4313314_Norm on 
+          Non-Respiratory related Generic Hospitalization for Kids - Within County")
+
+```

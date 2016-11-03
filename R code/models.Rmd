@@ -1,0 +1,107 @@
+---
+title: "HCUP - Models"
+author: "Akashdeep Jaswal"
+date: "June 8, 2016"
+output: word_document
+---
+
+```{r, results='hide',message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, results='hide',message=FALSE, warning=FALSE}
+
+#Installing required packages
+install.packages("plm",repos = "http://cran.us.r-project.org") 
+install.packages("data.table",repos = "http://cran.us.r-project.org")
+
+#Loading packages
+library(plm) #For Running Fixed Effects Models
+
+```
+
+```{r}
+# Reading the Cleaned data
+all.data <- read.csv('/Users/ajaswal/Desktop/AkashPersonal/hcup-population/Final_Data_group1.csv')
+all.data <- data.frame(all.data)
+
+all.data <- subset(all.data, select = -c(X))
+
+# Creating an interaction between Year and Month for Time Index for the random effects modeling
+all.data <- transform(all.data, t_index=interaction(year,month,sep="."))
+
+all.data <- all.data[order(all.data$County,all.data$t_index),c("County","t_index", "AgeGroup", "Population", "Patients_Count", "Patients_norm", "All_Vaccinated", "X4313314_SERIES", "X4313314_SERIES_Norm")]
+head(all.data)
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r}
+# Model1: Random Effects (Error Components) w/ Individual Effect (County) 
+
+random.effects <- plm(Patients_norm ~ X4313314_SERIES_Norm, data = all.data, index = c("County", "t_index"), model = "random", effect="individual")
+print(random.effects)
+summary(random.effects)
+# plot(random.effects)
+```
+
+Interpretation of Model 1: The coefficient for the X4313314_SERIES term is negative (-0.00378155) so that indicates that for every 1% increase in the series vaccination completion for all the vaccinated kids below the age of 4 years, the all cause hospitalization rate normalized by the kids population of the county goes down by 0.003. The results are statistically significant hence showing the expected relationship. 
+
+
+```{r}
+# Model 2: Fixed Effects w/ "Within" Model
+
+# In the previous model, there was just one intercept but we got an error term for the individual. 
+# To create a model with different intercepts for every individual county we build a fixed effects model 
+
+fixed.effects <- plm(Patients_norm ~ X4313314_SERIES_Norm, data = all.data, index = c("County", "t_index"), model = "within", effect = "individual")
+summary(fixed.effects)
+summary(fixef(fixed.effects))
+
+```
+
+Observations of Model 2: The adjusted R-squared value has slightly increased indicating a slightly better fit from the data. Let's try inclusion of interaction terms between % X4313314_SERIES_Norm Vaccinated and the individual County in Model 3. 
+
+```{r}
+fixed.effects2 <- plm(Patients_norm ~ X4313314_SERIES_Norm*factor(County), data = all.data, index = c("County", "t_index"), model = "within", effect = "individual")
+summary(fixed.effects2)
+summary(fixef(fixed.effects2))
+
+```
+
+Observations from Model 3: The Adjusted R-squared has improved to indicate a better fit. Most Interaction term coefficients are statistically significant hinting at the fact that every county has a different receptive affinity for vaccinations. 
+
+```{r}
+
+# Shapefile Obtained from Gov Census - https://www.census.gov/geo/maps-data/data/cbf/cbf_counties.html
+
+# Setting up Mapping 
+
+#install.packages('rgdal', repos = "http://cran.us.r-project.org")
+library(rgdal)
+# install.packages("scales")
+library(scales)
+library(ggplot2)
+library(ggmap)
+library(dplyr)
+# install.packages("rgeos")
+library(rgeos)
+library(broom)
+# install.packages("Cairo")
+library(Cairo)
+library(maptools)
+
+# Reading the Spatial Data Frame
+map.shapefile <- readOGR(dsn = ".", layer = "cb_2015_us_county_500k")
+map.df <- fortify(map.shapefile, region="GEOID") 
+
+map <- get_map("WA State", zoom = 7, maptype = "roadmap")
+p <- ggmap(map)
+p
+
+
+
+```
